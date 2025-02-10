@@ -10,7 +10,7 @@
 #define EXTISM_SUCCESS 0
 
 /** An alias for I64 to signify an Extism pointer */
-#define PTR I64
+#define EXTISM_PTR ExtismValType_I64
 
 
 /**
@@ -20,37 +20,39 @@ typedef enum {
   /**
    * Signed 32 bit integer.
    */
-  I32,
+  ExtismValType_I32,
   /**
    * Signed 64 bit integer.
    */
-  I64,
+  ExtismValType_I64,
   /**
    * Floating point 32 bit integer.
    */
-  F32,
+  ExtismValType_F32,
   /**
    * Floating point 64 bit integer.
    */
-  F64,
+  ExtismValType_F64,
   /**
    * A 128 bit number.
    */
-  V128,
+  ExtismValType_V128,
   /**
    * A reference to a Wasm function.
    */
-  FuncRef,
+  ExtismValType_FuncRef,
   /**
    * A reference to opaque data in the Wasm instance.
    */
-  ExternRef,
+  ExtismValType_ExternRef,
 } ExtismValType;
 
 /**
  * A `CancelHandle` can be used to cancel a running plugin from another thread
  */
 typedef struct ExtismCancelHandle ExtismCancelHandle;
+
+typedef struct ExtismCompiledPlugin ExtismCompiledPlugin;
 
 /**
  * CurrentPlugin stores data that is available to the caller in PDK functions, this should
@@ -114,6 +116,12 @@ extern "C" {
 const uint8_t *extism_plugin_id(ExtismPlugin *plugin);
 
 /**
+ * Get the current plugin's associated host context data. Returns null if call was made without
+ * host context.
+ */
+void *extism_current_plugin_host_context(ExtismCurrentPlugin *plugin);
+
+/**
  * Returns a pointer to the memory of the currently running plugin
  * NOTE: this should only be called from host functions.
  */
@@ -174,6 +182,21 @@ void extism_function_free(ExtismFunction *f);
 void extism_function_set_namespace(ExtismFunction *ptr, const char *namespace_);
 
 /**
+ * Pre-compile an Extism plugin
+ */
+ExtismCompiledPlugin *extism_compiled_plugin_new(const uint8_t *wasm,
+                                                 ExtismSize wasm_size,
+                                                 const ExtismFunction **functions,
+                                                 ExtismSize n_functions,
+                                                 bool with_wasi,
+                                                 char **errmsg);
+
+/**
+ * Free `ExtismCompiledPlugin`
+ */
+void extism_compiled_plugin_free(ExtismCompiledPlugin *plugin);
+
+/**
  * Create a new plugin with host functions, the functions passed to this function no longer need to be manually freed using
  *
  * `wasm`: is a WASM module (wat or wasm) or a JSON encoded manifest
@@ -190,12 +213,33 @@ ExtismPlugin *extism_plugin_new(const uint8_t *wasm,
                                 char **errmsg);
 
 /**
+ * Create a new plugin from an `ExtismCompiledPlugin`
+ */
+ExtismPlugin *extism_plugin_new_from_compiled(const ExtismCompiledPlugin *compiled, char **errmsg);
+
+/**
+ * Create a new plugin and set the number of instructions a plugin is allowed to execute
+ */
+ExtismPlugin *extism_plugin_new_with_fuel_limit(const uint8_t *wasm,
+                                                ExtismSize wasm_size,
+                                                const ExtismFunction **functions,
+                                                ExtismSize n_functions,
+                                                bool with_wasi,
+                                                uint64_t fuel_limit,
+                                                char **errmsg);
+
+/**
+ * Enable HTTP response headers in plugins using `extism:host/env::http_request`
+ */
+void extism_plugin_allow_http_response_headers(ExtismPlugin *plugin);
+
+/**
  * Free the error returned by `extism_plugin_new`, errors returned from `extism_plugin_error` don't need to be freed
  */
 void extism_plugin_new_error_free(char *err);
 
 /**
- * Remove a plugin from the registry and free associated memory
+ * Free `ExtismPlugin`
  */
 void extism_plugin_free(ExtismPlugin *plugin);
 
@@ -230,6 +274,20 @@ int32_t extism_plugin_call(ExtismPlugin *plugin,
                            const char *func_name,
                            const uint8_t *data,
                            ExtismSize data_len);
+
+/**
+ * Call a function with host context.
+ *
+ * `func_name`: is the function to call
+ * `data`: is the input data
+ * `data_len`: is the length of `data`
+ * `host_context`: a pointer to context data that will be available in host functions
+ */
+int32_t extism_plugin_call_with_host_context(ExtismPlugin *plugin,
+                                             const char *func_name,
+                                             const uint8_t *data,
+                                             ExtismSize data_len,
+                                             void *host_context);
 
 /**
  * Get the error associated with a `Plugin`
@@ -282,5 +340,5 @@ bool extism_plugin_reset(ExtismPlugin *plugin);
 const char *extism_version(void);
 
 #ifdef __cplusplus
-} // extern "C"
-#endif // __cplusplus
+}  // extern "C"
+#endif  // __cplusplus
