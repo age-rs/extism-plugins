@@ -20,6 +20,8 @@ macro_rules! args {
 /// Get a configuration value
 /// Params: i64 (offset)
 /// Returns: i64 (offset)
+/// **Note**: this function takes ownership of the handle passed in
+/// the caller should not `free` this value
 pub(crate) fn config_get(
     mut caller: Caller<CurrentPlugin>,
     input: &[Val],
@@ -38,6 +40,7 @@ pub(crate) fn config_get(
     };
     let val = data.manifest.config.get(key);
     let ptr = val.map(|x| (x.len(), x.as_ptr()));
+    data.memory_free(handle)?;
     let mem = match ptr {
         Some((len, ptr)) => {
             let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
@@ -55,6 +58,9 @@ pub(crate) fn config_get(
 /// Get a variable
 /// Params: i64 (offset)
 /// Returns: i64 (offset)
+/// **Note**: this function takes ownership of the handle passed in
+/// the caller should not `free` this value, but the return value
+/// will need to be freed
 pub(crate) fn var_get(
     mut caller: Caller<CurrentPlugin>,
     input: &[Val],
@@ -73,6 +79,8 @@ pub(crate) fn var_get(
     };
     let val = data.vars.get(key);
     let ptr = val.map(|x| (x.len(), x.as_ptr()));
+    data.memory_free(handle)?;
+
     let mem = match ptr {
         Some((len, ptr)) => {
             let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
@@ -90,6 +98,8 @@ pub(crate) fn var_get(
 /// Set a variable, if the value offset is 0 then the provided key will be removed
 /// Params: i64 (key offset), i64 (value offset)
 /// Returns: none
+/// **Note**: this function takes ownership of the handles passed in
+/// the caller should not `free` these values
 pub(crate) fn var_set(
     mut caller: Caller<CurrentPlugin>,
     input: &[Val],
@@ -97,25 +107,19 @@ pub(crate) fn var_set(
 ) -> Result<(), Error> {
     let data: &mut CurrentPlugin = caller.data_mut();
 
-    let mut size = 0;
-    for v in data.vars.values() {
-        size += v.len();
+    if data.manifest.memory.max_var_bytes.is_some_and(|x| x == 0) {
+        anyhow::bail!("Vars are disabled by this host")
     }
 
     let voffset = args!(input, 1, i64) as u64;
-
-    // If the store is larger than 100MB then stop adding things
-    if size > 1024 * 1024 * 100 && voffset != 0 {
-        return Err(Error::msg("Variable store is full"));
-    }
-
     let key_offs = args!(input, 0, i64) as u64;
+
+    let key_handle = match data.memory_handle(key_offs) {
+        Some(h) => h,
+        None => anyhow::bail!("invalid handle offset for var key: {key_offs}"),
+    };
     let key = {
-        let handle = match data.memory_handle(key_offs) {
-            Some(h) => h,
-            None => anyhow::bail!("invalid handle offset for var key: {key_offs}"),
-        };
-        let key = data.memory_str(handle)?;
+        let key = data.memory_str(key_handle)?;
         let key_len = key.len();
         let key_ptr = key.as_ptr();
         unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(key_ptr, key_len)) }
@@ -124,6 +128,7 @@ pub(crate) fn var_set(
     // Remove if the value offset is 0
     if voffset == 0 {
         data.vars.remove(key);
+        data.memory_free(key_handle)?;
         return Ok(());
     }
 
@@ -132,7 +137,26 @@ pub(crate) fn var_set(
         None => anyhow::bail!("invalid handle offset for var value: {voffset}"),
     };
 
+    let mut size = std::mem::size_of::<String>()
+        + std::mem::size_of::<Vec<u8>>()
+        + key.len()
+        + handle.length as usize;
+
+    for (k, v) in data.vars.iter() {
+        size += k.len();
+        size += v.len();
+        size += std::mem::size_of::<String>() + std::mem::size_of::<Vec<u8>>();
+    }
+
+    // If the store is larger than the configured size, or 1mb by default, then stop adding things
+    if size > data.manifest.memory.max_var_bytes.unwrap_or(1024 * 1024) as usize && voffset != 0 {
+        return Err(Error::msg("Variable store is full"));
+    }
+
     let value = data.memory_bytes(handle)?.to_vec();
+
+    data.memory_free(handle)?;
+    data.memory_free(key_handle)?;
 
     // Insert the value from memory into the `vars` map
     data.vars.insert(key.to_string(), value);
@@ -143,6 +167,9 @@ pub(crate) fn var_set(
 /// Make an HTTP request
 /// Params: i64 (offset to JSON encoded HttpRequest), i64 (offset to body or 0)
 /// Returns: i64 (offset)
+/// **Note**: this function takes ownership of the handles passed in
+/// the caller should not `free` these values, the result will need to
+/// be freed.
 pub(crate) fn http_request(
     #[allow(unused_mut)] mut caller: Caller<CurrentPlugin>,
     input: &[Val],
@@ -156,6 +183,7 @@ pub(crate) fn http_request(
             Some(h) => h,
             None => anyhow::bail!("http_request input is invalid: {http_req_offset}"),
         };
+        data.memory_free(handle)?;
         let req: extism_manifest::HttpRequest = serde_json::from_slice(data.memory_bytes(handle)?)?;
         output[0] = Val::I64(0);
         anyhow::bail!(
@@ -166,12 +194,16 @@ pub(crate) fn http_request(
 
     #[cfg(feature = "http")]
     {
+        data.http_headers.iter_mut().for_each(|x| x.clear());
+        data.http_status = 0;
+
         use std::io::Read;
         let handle = match data.memory_handle(http_req_offset) {
             Some(h) => h,
             None => anyhow::bail!("invalid handle offset for http request: {http_req_offset}"),
         };
         let req: extism_manifest::HttpRequest = serde_json::from_slice(data.memory_bytes(handle)?)?;
+        data.memory_free(handle)?;
 
         let body_offset = args!(input, 1, i64) as u64;
 
@@ -201,12 +233,22 @@ pub(crate) fn http_request(
             )));
         }
 
-        let mut r = ureq::request(req.method.as_deref().unwrap_or("GET"), &req.url);
+        let mut r = ureq::http::request::Builder::new()
+            .method(
+                req.method
+                    .as_deref()
+                    .unwrap_or("GET")
+                    .to_uppercase()
+                    .as_str(),
+            )
+            .uri(&req.url);
 
         for (k, v) in req.headers.iter() {
-            r = r.set(k, v);
+            r = r.header(k, v);
         }
 
+        // Set HTTP timeout to respect the manifest timeout
+        let timeout = data.time_remaining();
         let res = if body_offset > 0 {
             let handle = match data.memory_handle(body_offset) {
                 Some(h) => h,
@@ -215,22 +257,46 @@ pub(crate) fn http_request(
                 }
             };
             let buf: &[u8] = data.memory_bytes(handle)?;
-            r.send_bytes(buf)
+            let agent = ureq::agent();
+            let config = agent.configure_request(r.body(buf)?);
+            let req = config.timeout_global(timeout).build();
+            ureq::run(req)
         } else {
-            r.call()
+            let agent = ureq::agent();
+            let config = agent.configure_request(r.body(())?);
+            let req = config.timeout_global(timeout).build();
+            ureq::run(req)
         };
+
+        if let Some(handle) = data.memory_handle(body_offset) {
+            data.memory_free(handle)?;
+        }
 
         let reader = match res {
             Ok(res) => {
-                data.http_status = res.status();
-                Some(res.into_reader())
+                if let Some(headers) = &mut data.http_headers {
+                    for (name, h) in res.headers() {
+                        if let Ok(h) = h.to_str() {
+                            headers.insert(name.as_str().to_string(), h.to_string());
+                        }
+                    }
+                }
+                data.http_status = res.status().as_u16();
+                Some(res.into_body().into_reader())
             }
             Err(e) => {
-                if let Some(res) = e.into_response() {
-                    data.http_status = res.status();
-                    Some(res.into_reader())
-                } else {
+                // Catch timeout and return
+                if let Some(d) = data.time_remaining() {
+                    if matches!(e, ureq::Error::Timeout(_)) && d.as_nanos() == 0 {
+                        anyhow::bail!("timeout");
+                    }
+                }
+                let msg = e.to_string();
+                if let ureq::Error::StatusCode(res) = e {
+                    data.http_status = res;
                     None
+                } else {
+                    return Err(Error::msg(msg));
                 }
             }
         };
@@ -272,6 +338,24 @@ pub(crate) fn http_status_code(
     Ok(())
 }
 
+/// Get the HTTP response headers from the last HTTP request
+/// Params: none
+/// Returns: i64 (offset)
+pub(crate) fn http_headers(
+    mut caller: Caller<CurrentPlugin>,
+    _input: &[Val],
+    output: &mut [Val],
+) -> Result<(), Error> {
+    let data: &mut CurrentPlugin = caller.data_mut();
+    if let Some(h) = &data.http_headers {
+        let headers = serde_json::to_string(h)?;
+        data.memory_set_val(&mut output[0], headers)?;
+    } else {
+        output[0] = Val::I64(0);
+    }
+    Ok(())
+}
+
 pub fn log(
     level: tracing::Level,
     mut caller: Caller<CurrentPlugin>,
@@ -279,13 +363,22 @@ pub fn log(
     _output: &mut [Val],
 ) -> Result<(), Error> {
     let data: &mut CurrentPlugin = caller.data_mut();
+
     let offset = args!(input, 0, i64) as u64;
+
+    // Check if the current log level should be logged
+    let global_log_level = tracing::level_filters::LevelFilter::current();
+    if global_log_level == tracing::level_filters::LevelFilter::OFF || level > global_log_level {
+        if let Some(handle) = data.memory_handle(offset) {
+            data.memory_free(handle)?;
+        }
+        return Ok(());
+    }
 
     let handle = match data.memory_handle(offset) {
         Some(h) => h,
         None => anyhow::bail!("invalid handle offset for log message: {offset}"),
     };
-
     let id = data.id.to_string();
     let buf = data.memory_str(handle);
 
@@ -309,12 +402,16 @@ pub fn log(
         },
         Err(_) => tracing::error!(plugin = id, "unable to log message: {:?}", buf),
     }
+
+    data.memory_free(handle)?;
     Ok(())
 }
 
 /// Write to logs (warning)
 /// Params: i64 (offset)
 /// Returns: none
+/// **Note**: this function takes ownership of the handle passed in
+/// the caller should not `free` this value
 pub(crate) fn log_warn(
     caller: Caller<CurrentPlugin>,
     input: &[Val],
@@ -326,6 +423,8 @@ pub(crate) fn log_warn(
 /// Write to logs (info)
 /// Params: i64 (offset)
 /// Returns: none
+/// **Note**: this function takes ownership of the handle passed in
+/// the caller should not `free` this value
 pub(crate) fn log_info(
     caller: Caller<CurrentPlugin>,
     input: &[Val],
@@ -337,6 +436,8 @@ pub(crate) fn log_info(
 /// Write to logs (debug)
 /// Params: i64 (offset)
 /// Returns: none
+/// **Note**: this function takes ownership of the handle passed in
+/// the caller should not `free` this value
 pub(crate) fn log_debug(
     caller: Caller<CurrentPlugin>,
     input: &[Val],
@@ -348,10 +449,55 @@ pub(crate) fn log_debug(
 /// Write to logs (error)
 /// Params: i64 (offset)
 /// Returns: none
+/// **Note**: this function takes ownership of the handle passed in
+/// the caller should not `free` this value
 pub(crate) fn log_error(
     caller: Caller<CurrentPlugin>,
     input: &[Val],
     _output: &mut [Val],
 ) -> Result<(), Error> {
     log(tracing::Level::ERROR, caller, input, _output)
+}
+
+/// Write to logs (trace)
+/// Params: i64 (offset)
+/// Returns: none
+/// **Note**: this function takes ownership of the handle passed in
+/// the caller should not `free` this value
+pub(crate) fn log_trace(
+    caller: Caller<CurrentPlugin>,
+    input: &[Val],
+    _output: &mut [Val],
+) -> Result<(), Error> {
+    log(tracing::Level::TRACE, caller, input, _output)
+}
+
+/// Get the log level
+/// Params: none
+/// Returns: i32 (log level)
+pub(crate) fn get_log_level(
+    mut _caller: Caller<CurrentPlugin>,
+    _input: &[Val],
+    output: &mut [Val],
+) -> Result<(), Error> {
+    let level = tracing::level_filters::LevelFilter::current();
+    if level == tracing::level_filters::LevelFilter::OFF {
+        output[0] = Val::I32(i32::MAX)
+    } else {
+        output[0] = Val::I32(log_level_to_int(
+            level.into_level().unwrap_or(tracing::Level::ERROR),
+        ));
+    }
+    Ok(())
+}
+
+/// Convert log level to integer
+pub(crate) const fn log_level_to_int(level: tracing::Level) -> i32 {
+    match level {
+        tracing::Level::TRACE => 0,
+        tracing::Level::DEBUG => 1,
+        tracing::Level::INFO => 2,
+        tracing::Level::WARN => 3,
+        tracing::Level::ERROR => 4,
+    }
 }

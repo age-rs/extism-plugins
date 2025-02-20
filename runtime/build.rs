@@ -7,7 +7,7 @@ fn main() {
 #define EXTISM_SUCCESS 0
 
 /** An alias for I64 to signify an Extism pointer */
-#define PTR I64
+#define EXTISM_PTR ExtismValType_I64
 ";
     if let Ok(x) = cbindgen::Builder::new()
         .with_crate(".")
@@ -24,6 +24,7 @@ fn main() {
         .rename_item("CurrentPlugin", "ExtismCurrentPlugin")
         .rename_item("CancelHandle", "ExtismCancelHandle")
         .rename_item("Plugin", "ExtismPlugin")
+        .rename_item("CompiledPlugin", "ExtismCompiledPlugin")
         .rename_item("Function", "ExtismFunction")
         .with_style(cbindgen::Style::Type)
         .generate()

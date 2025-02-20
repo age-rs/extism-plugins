@@ -47,9 +47,13 @@ fn to_module(engine: &Engine, wasm: &extism_manifest::Wasm) -> Result<(String, M
             let name = meta.name.as_deref().unwrap_or(MAIN_KEY).to_string();
 
             // Load file
-            let mut buf = Vec::new();
-            let mut file = std::fs::File::open(path)?;
-            file.read_to_end(&mut buf)?;
+            let buf = std::fs::read(path).map_err(|err| {
+                Error::msg(format!(
+                    "Unable to load Wasm file \"{}\": {}",
+                    path.display(),
+                    err.kind()
+                ))
+            })?;
 
             check_hash(&meta.hash, &buf)?;
             Ok((name, Module::new(engine, buf)?))
@@ -82,14 +86,16 @@ fn to_module(engine: &Engine, wasm: &extism_manifest::Wasm) -> Result<(String, M
             #[cfg(feature = "register-http")]
             {
                 // Setup request
-                let mut req = ureq::request(method.as_deref().unwrap_or("GET"), url);
+                let mut req = ureq::http::request::Builder::new()
+                    .method(method.as_deref().unwrap_or("GET").to_uppercase().as_str())
+                    .uri(url);
 
                 for (k, v) in headers.iter() {
-                    req = req.set(k, v);
+                    req = req.header(k, v);
                 }
 
                 // Fetch WASM code
-                let mut r = req.call()?.into_reader();
+                let mut r = ureq::run(req.body(())?)?.into_body().into_reader();
                 let mut data = Vec::new();
                 r.read_to_end(&mut data)?;
 

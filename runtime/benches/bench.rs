@@ -6,6 +6,7 @@ const COUNT_VOWELS: &[u8] = include_bytes!("../../wasm/code.wasm");
 const REFLECT: &[u8] = include_bytes!("../../wasm/reflect.wasm");
 const ECHO: &[u8] = include_bytes!("../../wasm/echo.wasm");
 const CONSUME: &[u8] = include_bytes!("../../wasm/consume.wasm");
+const ALLOCATIONS: &[u8] = include_bytes!("../../wasm/allocations.wasm");
 
 host_fn!(hello_world (a: String) -> String { Ok(a) });
 
@@ -28,6 +29,46 @@ pub fn create_plugin(c: &mut Criterion) {
     g.bench_function("create_plugin", |b| {
         b.iter(|| {
             let _plugin = PluginBuilder::new(COUNT_VOWELS)
+                .with_wasi(true)
+                .build()
+                .unwrap();
+        })
+    });
+}
+
+pub fn create_compiled(c: &mut Criterion) {
+    let mut g = c.benchmark_group("create");
+    g.noise_threshold(1.0);
+    g.significance_level(0.2);
+    g.bench_function("create_compiled", |b| {
+        b.iter(|| {
+            let plugin = PluginBuilder::new(COUNT_VOWELS).with_wasi(true);
+            let _compiled = CompiledPlugin::new(plugin).unwrap();
+        })
+    });
+}
+
+pub fn create_plugin_compiled(c: &mut Criterion) {
+    let mut g = c.benchmark_group("create");
+    g.noise_threshold(1.0);
+    g.significance_level(0.2);
+    let plugin = PluginBuilder::new(COUNT_VOWELS).with_wasi(true);
+    let compiled = CompiledPlugin::new(plugin).unwrap();
+    g.bench_function("create_plugin_compiled", |b| {
+        b.iter(|| {
+            let _plugin = Plugin::new_from_compiled(&compiled).unwrap();
+        })
+    });
+}
+
+pub fn create_plugin_no_cache(c: &mut Criterion) {
+    let mut g = c.benchmark_group("create");
+    g.noise_threshold(1.0);
+    g.significance_level(0.2);
+    g.bench_function("create_plugin_no_cache", |b| {
+        b.iter(|| {
+            let _plugin = PluginBuilder::new(COUNT_VOWELS)
+                .with_cache_disabled()
                 .with_wasi(true)
                 .build()
                 .unwrap();
@@ -153,6 +194,17 @@ pub fn reflect(c: &mut Criterion) {
     }
 }
 
+pub fn allocations(c: &mut Criterion) {
+    let mut g = c.benchmark_group("allocations");
+
+    let mut plugin = PluginBuilder::new(ALLOCATIONS).build().unwrap();
+    g.bench_function("allocations", |b| {
+        b.iter(|| {
+            plugin.call::<_, ()>("allocations", "").unwrap();
+        })
+    });
+}
+
 // This is an apples-to-apples comparison of a linked wasm "reflect" function to our host "reflect"
 // function.
 pub fn reflect_linked(c: &mut Criterion) {
@@ -245,12 +297,16 @@ pub fn reflect_linked(c: &mut Criterion) {
 
 criterion_group!(
     benches,
+    allocations,
     consume,
     echo,
     reflect,
     reflect_linked,
     basic,
     create_plugin,
+    create_plugin_compiled,
+    create_plugin_no_cache,
+    create_compiled,
     count_vowels
 );
 criterion_main!(benches);

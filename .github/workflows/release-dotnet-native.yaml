@@ -1,4 +1,6 @@
 on:
+  release:
+    types: [published, edited]
   workflow_dispatch:
 
 name: Release .NET Native NuGet Packages
@@ -18,7 +20,7 @@ jobs:
         uses: actions/setup-dotnet@v3.0.3
         with:
            dotnet-version: 7.x
-      - uses: dawidd6/action-download-artifact@v2
+      - uses: dawidd6/action-download-artifact@v6
         with:
           workflow: release.yml
           name: release-artifacts
